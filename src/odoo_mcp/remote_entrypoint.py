@@ -185,12 +185,10 @@ def _configure_github_oauth(path: str) -> bool:
     allowed_users = set(_parse_csv(os.environ.get("MCP_GITHUB_ALLOWED_USERS")))
     scope = os.environ.get("MCP_OAUTH_SCOPE", "odoo").strip() or "odoo"
 
-    if bool(client_id) != bool(client_secret):
-        raise ValueError(
-            "Incomplete GitHub OAuth configuration: MCP_GITHUB_CLIENT_ID and "
-            "MCP_GITHUB_CLIENT_SECRET must be set together."
-        )
-    if not client_id:
+    # Partial GitHub OAuth configuration must stay safely disabled rather than
+    # crashing the web service. /mcp remains behind MCPAuthGate until both
+    # credentials are present.
+    if not client_id or not client_secret:
         return False
     if not public_url:
         raise ValueError(
