@@ -5,9 +5,10 @@ GitHub is used only as the upstream identity provider. MCP access and refresh
 tokens are opaque, high-entropy tokens issued by this process and scoped to
 this MCP resource.
 
-This provider intentionally supports dynamic client registration and PKCE.
-Access is additionally restricted by MCP_GITHUB_ALLOWED_USERS so possessing a
-GitHub account alone is not sufficient to reach the Odoo MCP server.
+This provider intentionally supports dynamic client registration, PKCE, and
+refresh/offline access. Access is additionally restricted by
+MCP_GITHUB_ALLOWED_USERS so possessing a GitHub account alone is not sufficient
+to reach the Odoo MCP server.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ ACCESS_TOKEN_TTL_SECONDS = 60 * 60
 REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 AUTH_CODE_TTL_SECONDS = 5 * 60
 GITHUB_STATE_TTL_SECONDS = 10 * 60
+OFFLINE_ACCESS_SCOPE = "offline_access"
 
 
 @dataclass
@@ -101,8 +103,6 @@ class GitHubOAuthProvider(
 
     @staticmethod
     def _is_safe_redirect_uri(uri: str) -> bool:
-        # Public MCP clients should use HTTPS redirects. Native clients may use
-        # loopback HTTP redirects per OAuth native-app guidance.
         lowered = uri.casefold()
         return lowered.startswith("https://") or lowered.startswith(
             ("http://127.0.0.1", "http://localhost", "http://[::1]")
@@ -138,7 +138,11 @@ class GitHubOAuthProvider(
                 error="invalid_redirect_uri",
                 error_description="At least one redirect URI is required.",
             )
-        unsafe = [str(uri) for uri in client_info.redirect_uris if not self._is_safe_redirect_uri(str(uri))]
+        unsafe = [
+            str(uri)
+            for uri in client_info.redirect_uris
+            if not self._is_safe_redirect_uri(str(uri))
+        ]
         if unsafe:
             raise RegistrationError(
                 error="invalid_redirect_uri",
@@ -157,8 +161,9 @@ class GitHubOAuthProvider(
                 error_description="The requested OAuth resource does not match this MCP server.",
             )
 
-        scopes = params.scopes or [self.scope]
-        if any(scope != self.scope for scope in scopes):
+        scopes = params.scopes or [self.scope, OFFLINE_ACCESS_SCOPE]
+        supported_scopes = {self.scope, OFFLINE_ACCESS_SCOPE}
+        if not set(scopes).issubset(supported_scopes) or self.scope not in scopes:
             raise AuthorizeError(
                 error="invalid_scope",
                 error_description="Unsupported OAuth scope.",
@@ -219,7 +224,11 @@ class GitHubOAuthProvider(
         if not github_access_token:
             raise ValueError(
                 "GitHub OAuth token exchange failed: "
-                + str(token_payload.get("error_description") or token_payload.get("error") or "unknown error")
+                + str(
+                    token_payload.get("error_description")
+                    or token_payload.get("error")
+                    or "unknown error"
+                )
             )
 
         user_response = requests.get(
@@ -239,7 +248,9 @@ class GitHubOAuthProvider(
         if not login or user_id is None:
             raise ValueError("GitHub did not return a valid user identity.")
         if login.casefold() not in self.allowed_users:
-            raise PermissionError("This GitHub account is not authorized for the Thrive Odoo MCP server.")
+            raise PermissionError(
+                "This GitHub account is not authorized for the Thrive Odoo MCP server."
+            )
 
         code = secrets.token_urlsafe(32)
         self.authorization_codes[code] = AuthorizationCode(
@@ -310,8 +321,15 @@ class GitHubOAuthProvider(
         self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
     ) -> OAuthToken:
         stored = self.authorization_codes.pop(authorization_code.code, None)
-        if stored is None or stored.client_id != client.client_id or stored.expires_at <= time.time():
-            raise TokenError(error="invalid_grant", error_description="Invalid or expired authorization code.")
+        if (
+            stored is None
+            or stored.client_id != client.client_id
+            or stored.expires_at <= time.time()
+        ):
+            raise TokenError(
+                error="invalid_grant",
+                error_description="Invalid or expired authorization code.",
+            )
         resource = stored.resource or self.resource_url
         return self._issue_token_pair(
             client_id=client.client_id,
@@ -337,10 +355,15 @@ class GitHubOAuthProvider(
     ) -> OAuthToken:
         stored = self.refresh_tokens.pop(refresh_token.token, None)
         if stored is None or stored.client_id != client.client_id:
-            raise TokenError(error="invalid_grant", error_description="Invalid refresh token.")
+            raise TokenError(
+                error="invalid_grant", error_description="Invalid refresh token."
+            )
         requested = scopes or stored.scopes
         if not set(requested).issubset(set(stored.scopes)):
-            raise TokenError(error="invalid_scope", error_description="Refresh requested an unauthorized scope.")
+            raise TokenError(
+                error="invalid_scope",
+                error_description="Refresh requested an unauthorized scope.",
+            )
         return self._issue_token_pair(
             client_id=client.client_id,
             scopes=requested,
@@ -353,7 +376,10 @@ class GitHubOAuthProvider(
         access = self.access_tokens.get(token)
         if access is None:
             return None
-        if access.resource and access.resource.rstrip("/") != self.resource_url.rstrip("/"):
+        if (
+            access.resource
+            and access.resource.rstrip("/") != self.resource_url.rstrip("/")
+        ):
             return None
         return access
 
