@@ -2,19 +2,19 @@
 
 The MCP client authenticates to this server using the SDK's OAuth endpoints.
 GitHub is used only as the upstream identity provider. MCP access and refresh
-tokens are opaque, high-entropy tokens issued by this process and scoped to
-this MCP resource.
+tokens are signed, self-contained credentials scoped to this MCP resource so
+client registrations and active sessions survive stateless host restarts.
 
-This provider intentionally supports dynamic client registration, PKCE, and
-refresh/offline access. Access is additionally restricted by
-MCP_GITHUB_ALLOWED_USERS so possessing a GitHub account alone is not sufficient
-to reach the Odoo MCP server.
+This provider supports dynamic client registration, PKCE, refresh/offline
+access, and an explicit GitHub-login allowlist.
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
+import json
 import secrets
 import time
 from dataclasses import dataclass
@@ -41,6 +41,9 @@ REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 AUTH_CODE_TTL_SECONDS = 5 * 60
 GITHUB_STATE_TTL_SECONDS = 10 * 60
 OFFLINE_ACCESS_SCOPE = "offline_access"
+CLIENT_TOKEN_PREFIX = "mcpc1"
+ACCESS_TOKEN_PREFIX = "mcpa1"
+REFRESH_TOKEN_PREFIX = "mcpr1"
 
 
 @dataclass
@@ -84,11 +87,24 @@ class GitHubOAuthProvider(
                 "GitHub OAuth is fail-closed without an explicit user allowlist."
             )
 
+        # Derive a purpose-separated signing key from the existing GitHub OAuth
+        # app secret. The secret itself is never placed in client IDs or tokens.
+        self._signing_key = hmac.new(
+            github_client_secret.encode("utf-8"),
+            b"thrive-odoo-mcp-oauth-state-v1",
+            hashlib.sha256,
+        ).digest()
+
+        # These dictionaries remain useful within one process for short-lived
+        # authorization state and backwards compatibility. Long-lived client
+        # registrations and bearer/refresh tokens are independently verifiable
+        # from their signatures after a restart.
         self.clients: dict[str, OAuthClientInformationFull] = {}
         self.pending: dict[str, PendingGitHubAuthorization] = {}
         self.authorization_codes: dict[str, AuthorizationCode] = {}
         self.access_tokens: dict[str, AccessToken] = {}
         self.refresh_tokens: dict[str, RefreshToken] = {}
+        self.revoked_token_digests: set[str] = set()
 
     @property
     def github_callback_url(self) -> str:
@@ -107,6 +123,68 @@ class GitHubOAuthProvider(
         return lowered.startswith("https://") or lowered.startswith(
             ("http://127.0.0.1", "http://localhost", "http://[::1]")
         )
+
+    @staticmethod
+    def _b64encode(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    @staticmethod
+    def _b64decode(value: str) -> bytes:
+        padding = "=" * (-len(value) % 4)
+        return base64.urlsafe_b64decode(value + padding)
+
+    def _signed_value(self, prefix: str, payload: dict[str, Any]) -> str:
+        raw = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        body = self._b64encode(raw)
+        signature = hmac.new(
+            self._signing_key,
+            f"{prefix}.{body}".encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+        return f"{prefix}.{body}.{self._b64encode(signature)}"
+
+    def _verify_signed_value(
+        self, value: str, prefix: str
+    ) -> dict[str, Any] | None:
+        try:
+            actual_prefix, body, supplied_signature = value.split(".", 2)
+        except ValueError:
+            return None
+        if actual_prefix != prefix:
+            return None
+        expected_signature = hmac.new(
+            self._signing_key,
+            f"{prefix}.{body}".encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+        try:
+            supplied = self._b64decode(supplied_signature)
+        except Exception:
+            return None
+        if not hmac.compare_digest(expected_signature, supplied):
+            return None
+        try:
+            payload = json.loads(self._b64decode(body).decode("utf-8"))
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _client_secret_for(self, client_id: str) -> str:
+        digest = hmac.new(
+            self._signing_key,
+            b"client-secret\x00" + client_id.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        return self._b64encode(digest)
+
+    @staticmethod
+    def _token_digest(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     def _cleanup_expired(self) -> None:
         now = time.time()
@@ -130,7 +208,37 @@ class GitHubOAuthProvider(
         }
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        return self.clients.get(client_id)
+        legacy = self.clients.get(client_id)
+        if legacy is not None:
+            return legacy
+
+        payload = self._verify_signed_value(client_id, CLIENT_TOKEN_PREFIX)
+        if payload is None:
+            return None
+        client_data = payload.get("client")
+        if not isinstance(client_data, dict):
+            return None
+
+        data = dict(client_data)
+        data["client_id"] = client_id
+        auth_method = data.get("token_endpoint_auth_method")
+        if auth_method != "none":
+            data["client_secret"] = self._client_secret_for(client_id)
+        else:
+            data["client_secret"] = None
+
+        expires_at = data.get("client_secret_expires_at")
+        if expires_at not in (None, 0):
+            try:
+                if int(expires_at) <= int(time.time()):
+                    return None
+            except (TypeError, ValueError):
+                return None
+
+        try:
+            return OAuthClientInformationFull.model_validate(data)
+        except Exception:
+            return None
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         if not client_info.redirect_uris:
@@ -148,6 +256,22 @@ class GitHubOAuthProvider(
                 error="invalid_redirect_uri",
                 error_description="Redirect URIs must use HTTPS or an HTTP loopback address.",
             )
+
+        # The SDK creates random credentials before calling register_client().
+        # Replace them in-place with signed/reconstructable credentials. The
+        # registration handler returns this same object to the MCP client.
+        client_data = client_info.model_dump(mode="json")
+        client_data.pop("client_id", None)
+        client_data.pop("client_secret", None)
+        signed_client_id = self._signed_value(
+            CLIENT_TOKEN_PREFIX,
+            {"client": client_data},
+        )
+        client_info.client_id = signed_client_id
+        if client_info.token_endpoint_auth_method != "none":
+            client_info.client_secret = self._client_secret_for(signed_client_id)
+        else:
+            client_info.client_secret = None
         self.clients[client_info.client_id] = client_info
 
     async def authorize(
@@ -289,13 +413,36 @@ class GitHubOAuthProvider(
         resource: str,
     ) -> OAuthToken:
         now = int(time.time())
-        access_value = secrets.token_urlsafe(48)
-        refresh_value = secrets.token_urlsafe(64)
+        access_expires_at = now + ACCESS_TOKEN_TTL_SECONDS
+        refresh_expires_at = now + REFRESH_TOKEN_TTL_SECONDS
+        access_value = self._signed_value(
+            ACCESS_TOKEN_PREFIX,
+            {
+                "client_id": client_id,
+                "scopes": scopes,
+                "subject": subject,
+                "resource": resource,
+                "issued_at": now,
+                "expires_at": access_expires_at,
+                "nonce": secrets.token_urlsafe(12),
+            },
+        )
+        refresh_value = self._signed_value(
+            REFRESH_TOKEN_PREFIX,
+            {
+                "client_id": client_id,
+                "scopes": scopes,
+                "subject": subject,
+                "issued_at": now,
+                "expires_at": refresh_expires_at,
+                "nonce": secrets.token_urlsafe(16),
+            },
+        )
         access = AccessToken(
             token=access_value,
             client_id=client_id,
             scopes=scopes,
-            expires_at=now + ACCESS_TOKEN_TTL_SECONDS,
+            expires_at=access_expires_at,
             resource=resource,
             subject=subject,
             claims={"iss": self.public_url},
@@ -304,7 +451,7 @@ class GitHubOAuthProvider(
             token=refresh_value,
             client_id=client_id,
             scopes=scopes,
-            expires_at=now + REFRESH_TOKEN_TTL_SECONDS,
+            expires_at=refresh_expires_at,
             subject=subject,
         )
         self.access_tokens[access_value] = access
@@ -342,10 +489,31 @@ class GitHubOAuthProvider(
         self, client: OAuthClientInformationFull, refresh_token: str
     ) -> RefreshToken | None:
         self._cleanup_expired()
-        token = self.refresh_tokens.get(refresh_token)
-        if token is None or token.client_id != client.client_id:
+        if self._token_digest(refresh_token) in self.revoked_token_digests:
             return None
-        return token
+
+        token = self.refresh_tokens.get(refresh_token)
+        if token is not None:
+            return token if token.client_id == client.client_id else None
+
+        payload = self._verify_signed_value(refresh_token, REFRESH_TOKEN_PREFIX)
+        if payload is None or payload.get("client_id") != client.client_id:
+            return None
+        try:
+            expires_at = int(payload["expires_at"])
+            scopes = [str(value) for value in payload.get("scopes", [])]
+        except (KeyError, TypeError, ValueError):
+            return None
+        if expires_at <= int(time.time()):
+            return None
+        subject = payload.get("subject")
+        return RefreshToken(
+            token=refresh_token,
+            client_id=client.client_id,
+            scopes=scopes,
+            expires_at=expires_at,
+            subject=str(subject) if subject is not None else None,
+        )
 
     async def exchange_refresh_token(
         self,
@@ -353,7 +521,7 @@ class GitHubOAuthProvider(
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        stored = self.refresh_tokens.pop(refresh_token.token, None)
+        stored = await self.load_refresh_token(client, refresh_token.token)
         if stored is None or stored.client_id != client.client_id:
             raise TokenError(
                 error="invalid_grant", error_description="Invalid refresh token."
@@ -373,16 +541,46 @@ class GitHubOAuthProvider(
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         self._cleanup_expired()
+        if self._token_digest(token) in self.revoked_token_digests:
+            return None
+
         access = self.access_tokens.get(token)
-        if access is None:
+        if access is not None:
+            if (
+                access.resource
+                and access.resource.rstrip("/") != self.resource_url.rstrip("/")
+            ):
+                return None
+            return access
+
+        payload = self._verify_signed_value(token, ACCESS_TOKEN_PREFIX)
+        if payload is None:
             return None
-        if (
-            access.resource
-            and access.resource.rstrip("/") != self.resource_url.rstrip("/")
-        ):
+        try:
+            expires_at = int(payload["expires_at"])
+            client_id = str(payload["client_id"])
+            scopes = [str(value) for value in payload.get("scopes", [])]
+            resource = str(payload["resource"])
+        except (KeyError, TypeError, ValueError):
             return None
-        return access
+        if expires_at <= int(time.time()):
+            return None
+        if resource.rstrip("/") != self.resource_url.rstrip("/"):
+            return None
+        if await self.get_client(client_id) is None:
+            return None
+        subject = payload.get("subject")
+        return AccessToken(
+            token=token,
+            client_id=client_id,
+            scopes=scopes,
+            expires_at=expires_at,
+            resource=resource,
+            subject=str(subject) if subject is not None else None,
+            claims={"iss": self.public_url},
+        )
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
+        self.revoked_token_digests.add(self._token_digest(token.token))
         self.access_tokens.pop(token.token, None)
         self.refresh_tokens.pop(token.token, None)
