@@ -30,7 +30,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from .auth import build_auth
 from .github_oauth import GitHubOAuthProvider, OFFLINE_ACCESS_SCOPE
-from .server import mcp
+from .server import get_odoo_client, mcp
 
 LOCAL_HTTP_HOSTS = {"127.0.0.1", "localhost", "::1"}
 DEFAULT_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
@@ -274,6 +274,19 @@ def _active_auth_mode() -> str:
     return "fail-closed"
 
 
+def _verify_odoo_auth() -> None:
+    try:
+        get_odoo_client()
+    except Exception as exc:
+        print(
+            f"Odoo authentication: failed ({type(exc).__name__})",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    print("Odoo authentication: ok", file=sys.stderr, flush=True)
+
+
 def main() -> None:
     host = os.environ.get("MCP_HTTP_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port = int(
@@ -288,6 +301,7 @@ def main() -> None:
         file=sys.stderr,
         flush=True,
     )
+    _verify_odoo_auth()
     uvicorn.run(app, host=host, port=port, log_level=log_level)
 
 
