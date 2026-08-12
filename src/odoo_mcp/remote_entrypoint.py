@@ -29,7 +29,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from .auth import build_auth
-from .github_oauth import GitHubOAuthProvider
+from .github_oauth import GitHubOAuthProvider, OFFLINE_ACCESS_SCOPE
 from .server import mcp
 
 LOCAL_HTTP_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -202,8 +202,8 @@ def _configure_github_oauth(path: str) -> bool:
         resource_server_url=AnyHttpUrl(resource_url),
         client_registration_options=ClientRegistrationOptions(
             enabled=True,
-            valid_scopes=[scope],
-            default_scopes=[scope],
+            valid_scopes=[scope, OFFLINE_ACCESS_SCOPE],
+            default_scopes=[scope, OFFLINE_ACCESS_SCOPE],
             client_secret_expiry_seconds=30 * 24 * 60 * 60,
         ),
         revocation_options=RevocationOptions(enabled=True),
@@ -283,7 +283,11 @@ def main() -> None:
     )
     log_level = os.environ.get("MCP_LOG_LEVEL", "INFO").strip().lower() or "info"
     app = build_app()
-    print(f"Remote MCP authentication mode: {_active_auth_mode()}", file=sys.stderr, flush=True)
+    print(
+        f"Remote MCP authentication mode: {_active_auth_mode()}",
+        file=sys.stderr,
+        flush=True,
+    )
     uvicorn.run(app, host=host, port=port, log_level=log_level)
 
 
