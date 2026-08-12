@@ -33,5 +33,6 @@ ENV PYTHONUNBUFFERED=1
 # Streamable HTTP uses this port by default when enabled.
 EXPOSE 8000
 
-# Run through the public package entry point.
-ENTRYPOINT ["odoo-mcp"]
+# Preserve stdio for local Docker use, but route HTTP transports through the
+# fail-closed remote entrypoint that requires OAuth or bearer authentication.
+ENTRYPOINT ["python", "-m", "odoo_mcp.docker_entrypoint"]
