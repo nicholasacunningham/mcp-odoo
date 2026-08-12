@@ -5,7 +5,7 @@ Remote MCP is fail-closed. Authentication preference is:
 1. The repository's existing external OAuth resource-server configuration
    (ODOO_MCP_AUTH_*), or
 2. The built-in GitHub-backed OAuth 2.1 authorization server
-   (MCP_GITHUB_* + MCP_PUBLIC_URL), or
+   (MCP_GITHUB_*; public URL derives from Render automatically), or
 3. An explicitly configured static bearer-token SHA-256 digest.
 
 If none is configured, /mcp returns HTTP 503 and never executes MCP code.
@@ -176,22 +176,28 @@ def _configure_github_oauth(path: str) -> bool:
     """Enable same-process OAuth 2.1 with GitHub as the upstream IdP."""
     global _github_provider
 
-    public_url = os.environ.get("MCP_PUBLIC_URL", "").strip().rstrip("/")
+    public_url = (
+        os.environ.get("MCP_PUBLIC_URL", "").strip()
+        or os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+    ).rstrip("/")
     client_id = os.environ.get("MCP_GITHUB_CLIENT_ID", "").strip()
     client_secret = os.environ.get("MCP_GITHUB_CLIENT_SECRET", "").strip()
     allowed_users = set(_parse_csv(os.environ.get("MCP_GITHUB_ALLOWED_USERS")))
     scope = os.environ.get("MCP_OAUTH_SCOPE", "odoo").strip() or "odoo"
 
-    supplied = [bool(public_url), bool(client_id), bool(client_secret)]
-    if any(supplied) and not all(supplied):
+    if bool(client_id) != bool(client_secret):
         raise ValueError(
-            "Incomplete GitHub OAuth configuration: MCP_PUBLIC_URL, "
-            "MCP_GITHUB_CLIENT_ID, and MCP_GITHUB_CLIENT_SECRET must be set together."
+            "Incomplete GitHub OAuth configuration: MCP_GITHUB_CLIENT_ID and "
+            "MCP_GITHUB_CLIENT_SECRET must be set together."
         )
-    if not all(supplied):
+    if not client_id:
         return False
+    if not public_url:
+        raise ValueError(
+            "GitHub OAuth requires MCP_PUBLIC_URL, or RENDER_EXTERNAL_URL when running on Render."
+        )
     if not public_url.startswith("https://"):
-        raise ValueError("MCP_PUBLIC_URL must use HTTPS for a remote OAuth deployment.")
+        raise ValueError("The OAuth public URL must use HTTPS for a remote deployment.")
 
     resource_url = f"{public_url}/{path.strip('/')}"
     provider = GitHubOAuthProvider(
@@ -271,7 +277,11 @@ def build_app() -> Any:
 
 def main() -> None:
     host = os.environ.get("MCP_HTTP_HOST", "127.0.0.1").strip() or "127.0.0.1"
-    port = int(os.environ.get("MCP_HTTP_PORT", "8000"))
+    port = int(
+        os.environ.get("MCP_HTTP_PORT", "").strip()
+        or os.environ.get("PORT", "").strip()
+        or "8000"
+    )
     log_level = os.environ.get("MCP_LOG_LEVEL", "INFO").strip().lower() or "info"
     app = build_app()
     uvicorn.run(app, host=host, port=port, log_level=log_level)
