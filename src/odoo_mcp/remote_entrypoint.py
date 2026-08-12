@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import sys
 from typing import Any
 
 import uvicorn
@@ -82,7 +83,6 @@ async def github_oauth_callback(request: Request) -> Response:
     except PermissionError:
         return JSONResponse({"error": "github_user_not_authorized"}, status_code=403)
     except Exception:
-        # Do not reflect upstream OAuth details, secrets, or tokens to the browser.
         return JSONResponse({"error": "github_oauth_callback_failed"}, status_code=400)
     return RedirectResponse(url=redirect_uri, status_code=302)
 
@@ -90,13 +90,7 @@ async def github_oauth_callback(request: Request) -> Response:
 class MCPAuthGate:
     """ASGI bearer gate used only when OAuth is not active."""
 
-    def __init__(
-        self,
-        app: Any,
-        *,
-        mcp_path: str,
-        token_sha256: str | None,
-    ) -> None:
+    def __init__(self, app: Any, *, mcp_path: str, token_sha256: str | None) -> None:
         self.app = app
         self.mcp_path = "/" + mcp_path.strip("/")
         self.token_sha256 = (token_sha256 or "").strip().lower() or None
@@ -185,9 +179,6 @@ def _configure_github_oauth(path: str) -> bool:
     allowed_users = set(_parse_csv(os.environ.get("MCP_GITHUB_ALLOWED_USERS")))
     scope = os.environ.get("MCP_OAUTH_SCOPE", "odoo").strip() or "odoo"
 
-    # Partial GitHub OAuth configuration must stay safely disabled rather than
-    # crashing the web service. /mcp remains behind MCPAuthGate until both
-    # credentials are present.
     if not client_id or not client_secret:
         return False
     if not public_url:
@@ -273,6 +264,16 @@ def build_app() -> Any:
     return MCPAuthGate(app, mcp_path=path, token_sha256=token_sha256)
 
 
+def _active_auth_mode() -> str:
+    if _github_provider is not None:
+        return "github-oauth"
+    if mcp.settings.auth is not None:
+        return "external-oauth"
+    if os.environ.get("MCP_HTTP_AUTH_TOKEN_SHA256", "").strip():
+        return "static-bearer"
+    return "fail-closed"
+
+
 def main() -> None:
     host = os.environ.get("MCP_HTTP_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port = int(
@@ -282,6 +283,7 @@ def main() -> None:
     )
     log_level = os.environ.get("MCP_LOG_LEVEL", "INFO").strip().lower() or "info"
     app = build_app()
+    print(f"Remote MCP authentication mode: {_active_auth_mode()}", file=sys.stderr, flush=True)
     uvicorn.run(app, host=host, port=port, log_level=log_level)
 
 
