@@ -5,8 +5,11 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+
 from .server_core import DESTRUCTIVE_TOOL, PREVIEW_TOOL, mcp as _MCP
-from .sign_policy import SIGN_PROFILE_ENV, SIGN_MODELS, set_plugin_api
+from .sign_policy import SIGN_PROFILE_ENV, SIGN_MODELS, SIGN_WRITE_ENV, set_plugin_api
 from .sign_tools_data import sign_contacts, sign_files, sign_health, sign_model
 from .sign_tools_request import sign_action, sign_request
 
@@ -38,6 +41,25 @@ TOOLS = (
         DESTRUCTIVE_TOOL,
     ),
 )
+
+
+@_MCP.custom_route("/sign-health", methods=["GET", "HEAD"])
+async def sign_profile_health(_: Request) -> Response:
+    """Public non-secret proof that the dedicated Sign plugin is loaded."""
+    registry = getattr(getattr(_MCP, "_tool_manager", None), "_tools", {})
+    tool_names = sorted(
+        str(name) for name in registry if str(name).startswith("sign_")
+    ) if isinstance(registry, dict) else []
+    return JSONResponse(
+        {
+            "status": "ok",
+            "profile": os.environ.get(SIGN_PROFILE_ENV, "").strip() or None,
+            "sign_writes_enabled": os.environ.get(SIGN_WRITE_ENV, "").strip().casefold()
+            in {"1", "true", "yes", "on"},
+            "tool_count": len(tool_names),
+            "tools": tool_names,
+        }
+    )
 
 
 def _apply_profile() -> None:
