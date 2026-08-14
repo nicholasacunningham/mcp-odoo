@@ -26,9 +26,10 @@ jobs:
             src/odoo_mcp/sign_policy.py \
             src/odoo_mcp/sign_tools_data.py \
             src/odoo_mcp/sign_tools_request.py \
+            src/odoo_mcp/sign_live_smoke.py \
             src/odoo_mcp/tools_sign.py
 
-      - name: Verify Render Sign profile
+      - name: Verify Render Sign profile and document smoke
         shell: bash
         run: |
           set -euo pipefail
@@ -54,12 +55,19 @@ jobs:
               "sign_request",
           }
           actual = set(payload.get("tools") or [])
+          smoke = payload.get("document_smoke") or {}
           ok = (
               payload.get("status") == "ok"
               and payload.get("profile") == "sign"
               and payload.get("sign_writes_enabled") is True
               and payload.get("tool_count") == 6
               and actual == expected
+              and smoke.get("status") == "ok"
+              and smoke.get("mode") == "draft_only"
+              and smoke.get("sent") is False
+              and smoke.get("created") is True
+              and smoke.get("read_back") is True
+              and smoke.get("cleaned") is True
           )
           if ok:
               print(json.dumps(payload, sort_keys=True))
@@ -71,5 +79,5 @@ jobs:
             fi
             sleep 5
           done
-          echo "Render did not expose the expected Sign-only health payload" >&2
+          echo "Render did not expose the expected Sign document smoke result" >&2
           exit 1
