@@ -1,0 +1,75 @@
+name: Sign deploy smoke
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sign-profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Compile Sign modules
+        run: |
+          python -m py_compile \
+            src/odoo_mcp/sign_policy.py \
+            src/odoo_mcp/sign_tools_data.py \
+            src/odoo_mcp/sign_tools_request.py \
+            src/odoo_mcp/tools_sign.py
+
+      - name: Verify Render Sign profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          endpoint="https://mcp-odoo-65yn.onrender.com/sign-health"
+          for attempt in $(seq 1 60); do
+            response="$(curl -fsS --max-time 15 "$endpoint" 2>/dev/null || true)"
+            if RESPONSE="$response" python - <<'PY'
+          import json
+          import os
+          import sys
+
+          try:
+              payload = json.loads(os.environ.get("RESPONSE", ""))
+          except Exception:
+              sys.exit(1)
+
+          expected = {
+              "sign_action",
+              "sign_contacts",
+              "sign_files",
+              "sign_health",
+              "sign_model",
+              "sign_request",
+          }
+          actual = set(payload.get("tools") or [])
+          ok = (
+              payload.get("status") == "ok"
+              and payload.get("profile") == "sign"
+              and payload.get("sign_writes_enabled") is True
+              and payload.get("tool_count") == 6
+              and actual == expected
+          )
+          if ok:
+              print(json.dumps(payload, sort_keys=True))
+              sys.exit(0)
+          sys.exit(1)
+          PY
+            then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Render did not expose the expected Sign-only health payload" >&2
+          exit 1
