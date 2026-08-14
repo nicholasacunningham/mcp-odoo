@@ -31,7 +31,6 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 from .auth import build_auth
 from .github_oauth import GitHubOAuthProvider, OFFLINE_ACCESS_SCOPE
 from .server import get_odoo_client, mcp
-from .sign_live_smoke import run_document_smoke
 
 LOCAL_HTTP_HOSTS = {"127.0.0.1", "localhost", "::1"}
 DEFAULT_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
@@ -277,7 +276,7 @@ def _active_auth_mode() -> str:
 
 def _verify_odoo_auth() -> None:
     try:
-        odoo = get_odoo_client()
+        get_odoo_client()
     except Exception as exc:
         print(
             f"Odoo authentication: failed ({type(exc).__name__})",
@@ -286,11 +285,6 @@ def _verify_odoo_auth() -> None:
         )
         return
     print("Odoo authentication: ok", file=sys.stderr, flush=True)
-    if (
-        os.environ.get("ODOO_MCP_PROFILE", "").strip().casefold() == "sign"
-        and _truthy(os.environ.get("ODOO_MCP_SIGN_ENABLE_WRITES"))
-    ):
-        run_document_smoke(odoo)
 
 
 def main() -> None:
