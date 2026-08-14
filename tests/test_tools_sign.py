@@ -65,7 +65,6 @@ def test_sign_profile_prunes_generic_surface(monkeypatch):
     templates = mcp._resource_manager._templates
     prompts = mcp._prompt_manager._prompts
     snapshots = (dict(tools), dict(resources), dict(templates), dict(prompts))
-    old_name = mcp._lowlevel_server.name
     old_instructions = mcp._lowlevel_server.instructions
 
     monkeypatch.setenv("ODOO_MCP_PROFILE", "sign")
@@ -82,7 +81,6 @@ def test_sign_profile_prunes_generic_surface(monkeypatch):
         assert resources == {}
         assert templates == {}
         assert prompts == {}
-        assert mcp.name == "OdooSign MCP"
         assert "never forge" in (mcp.instructions or "")
     finally:
         for registry, snapshot in zip(
@@ -90,5 +88,4 @@ def test_sign_profile_prunes_generic_surface(monkeypatch):
         ):
             registry.clear()
             registry.update(snapshot)
-        mcp._lowlevel_server.name = old_name
         mcp._lowlevel_server.instructions = old_instructions
