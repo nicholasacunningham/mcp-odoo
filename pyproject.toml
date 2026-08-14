@@ -48,6 +48,9 @@ dev = [
 [project.scripts]
 odoo-mcp = "odoo_mcp.__main__:main"
 
+[project.entry-points."odoo_mcp.tools"]
+sign = "odoo_mcp.tools_sign:register"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 packages = ["odoo_mcp"]
