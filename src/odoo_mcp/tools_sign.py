@@ -60,7 +60,6 @@ def _apply_profile() -> None:
             values.clear()
     lowlevel = getattr(_MCP, "_lowlevel_server", None)
     if lowlevel is not None:
-        lowlevel.name = "OdooSign MCP"
         lowlevel.instructions = (
             "Odoo Sign-only MCP. Manage Sign data and workflows, but never forge "
             "or apply a signer signature."
