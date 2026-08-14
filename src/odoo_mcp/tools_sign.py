@@ -9,7 +9,6 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from .server_core import DESTRUCTIVE_TOOL, PREVIEW_TOOL, mcp as _MCP
-from .sign_live_smoke import get_document_smoke_status
 from .sign_policy import SIGN_PROFILE_ENV, SIGN_MODELS, SIGN_WRITE_ENV, set_plugin_api
 from .sign_tools_data import sign_contacts, sign_files, sign_health, sign_model
 from .sign_tools_request import sign_action, sign_request
@@ -59,7 +58,6 @@ async def sign_profile_health(_: Request) -> Response:
             in {"1", "true", "yes", "on"},
             "tool_count": len(tool_names),
             "tools": tool_names,
-            "document_smoke": get_document_smoke_status(),
         }
     )
 
