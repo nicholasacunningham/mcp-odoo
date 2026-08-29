@@ -1,0 +1,31 @@
+name: Temporary Probate Fetch
+
+on:
+  push:
+    branches:
+      - temp-probate-fetch-20260829-run
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 selenium
+      - name: Fetch probate viewer
+        run: python scripts/fetch_probate_viewer.py
+      - name: List capture files
+        if: always()
+        run: find probate_capture -maxdepth 1 -type f -printf '%f %s bytes\n' | sort || true
+      - name: Upload capture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probate-capture
+          path: probate_capture
+          if-no-files-found: warn
