@@ -1,0 +1,31 @@
+name: Temporary Probate Page Capture
+
+on:
+  push:
+    branches:
+      - temp-probate-fetch-20260829-run
+  workflow_dispatch:
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install selenium
+      - name: Capture rendered pages
+        run: python scripts/capture_probate_pages.py
+      - name: List captures
+        if: always()
+        run: find probate_pages -maxdepth 1 -type f -printf '%f %s bytes\n' | sort || true
+      - name: Upload page captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probate-pages
+          path: probate_pages
+          if-no-files-found: warn
