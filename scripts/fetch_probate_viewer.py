@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -8,6 +9,7 @@ from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 from selenium import webdriver
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.chrome.options import Options
 
 URL = "https://www.southcarolinaprobate.net/search/ViewImage.aspx?id=61fd5200-b215-49a2-ba59-0ca38cc3aa3e"
@@ -26,13 +28,15 @@ def safe_name(url, idx, ctype=""):
             base += ".jpg"
         elif "image/png" in ctype:
             base += ".png"
+        elif "image/tiff" in ctype:
+            base += ".tif"
         else:
             base += ".bin"
     return f"{idx:03d}_{base}"
 
 # Plain HTTP request first
 try:
-    r = requests.get(URL, timeout=30, allow_redirects=True)
+    r = requests.get(URL, timeout=20, allow_redirects=True)
     (OUT / "requests_body.bin").write_bytes(r.content)
     (OUT / "requests_meta.json").write_text(json.dumps({
         "status": r.status_code,
@@ -41,11 +45,12 @@ try:
         "content_type": r.headers.get("content-type"),
         "length": len(r.content),
     }, indent=2))
-    print("REQUESTS", r.status_code, r.url, r.headers.get("content-type"), len(r.content))
+    print("REQUESTS", r.status_code, r.url, r.headers.get("content-type"), len(r.content), flush=True)
 except Exception as e:
-    print("REQUESTS ERROR", repr(e))
+    print("REQUESTS ERROR", repr(e), flush=True)
 
 opts = Options()
+opts.page_load_strategy = "eager"
 opts.add_argument("--headless=new")
 opts.add_argument("--no-sandbox")
 opts.add_argument("--disable-dev-shm-usage")
@@ -54,13 +59,18 @@ opts.add_argument("--ignore-certificate-errors")
 opts.set_capability("goog:loggingPrefs", {"performance": "ALL", "browser": "ALL"})
 
 driver = webdriver.Chrome(options=opts)
+driver.set_page_load_timeout(25)
 try:
-    driver.get(URL)
-    time.sleep(12)
+    driver.execute_cdp_cmd("Network.enable", {})
+    try:
+        driver.get(URL)
+    except TimeoutException:
+        print("PAGELOAD TIMEOUT - continuing with captured state", flush=True)
+    time.sleep(8)
     (OUT / "page_source.html").write_text(driver.page_source, encoding="utf-8")
     driver.save_screenshot(str(OUT / "viewer.png"))
-    print("TITLE", driver.title)
-    print("FINALURL", driver.current_url)
+    print("TITLE", driver.title, flush=True)
+    print("FINALURL", driver.current_url, flush=True)
 
     # Collect DOM URLs from all accessible frames
     dom_records = []
@@ -81,14 +91,14 @@ try:
             (OUT / f"frame_{i}.html").write_text(driver.page_source, encoding="utf-8")
             driver.switch_to.default_content()
         except Exception as e:
-            print("FRAME ERROR", i, repr(e))
+            print("FRAME ERROR", i, repr(e), flush=True)
             try:
                 driver.switch_to.default_content()
             except Exception:
                 pass
     (OUT / "dom_urls.json").write_text(json.dumps(dom_records, indent=2), encoding="utf-8")
     for rec in dom_records:
-        print("DOM", rec)
+        print("DOM", rec, flush=True)
 
     # Decode Chrome performance network log
     responses = []
@@ -111,9 +121,30 @@ try:
     (OUT / "network_responses.json").write_text(json.dumps(responses, indent=2), encoding="utf-8")
 
     for rec in responses:
-        print("NET", rec["status"], rec["type"], rec["mimeType"], rec["url"])
+        print("NET", rec["status"], rec["type"], rec["mimeType"], rec["url"], flush=True)
 
-    # Re-fetch candidate resources with browser cookies so binary docs/images are preserved
+    # Save response bodies directly from Chromium wherever possible.
+    body_meta = []
+    for idx, rec in enumerate(responses, 1):
+        u = rec.get("url") or ""
+        mime = (rec.get("mimeType") or "").lower()
+        typ = (rec.get("type") or "").lower()
+        if not u.startswith("http"):
+            continue
+        if not ("pdf" in mime or mime.startswith("image/") or typ in {"document", "xhr", "fetch", "image"} or any(x in u.lower() for x in ["image", "document", "view", "pdf", "download", "handler", ".ashx", ".aspx"])):
+            continue
+        try:
+            body = driver.execute_cdp_cmd("Network.getResponseBody", {"requestId": rec["requestId"]})
+            raw = base64.b64decode(body["body"]) if body.get("base64Encoded") else body.get("body", "").encode("utf-8")
+            fname = "cdp_" + safe_name(u, idx, mime)
+            (OUT / fname).write_bytes(raw)
+            body_meta.append({"url": u, "mimeType": mime, "length": len(raw), "file": fname})
+            print("CDP SAVE", mime, len(raw), fname, u, flush=True)
+        except Exception as e:
+            print("CDP ERROR", u, repr(e), flush=True)
+    (OUT / "cdp_bodies.json").write_text(json.dumps(body_meta, indent=2), encoding="utf-8")
+
+    # Re-fetch candidate resources with browser cookies so binary docs/images are preserved.
     sess = requests.Session()
     ua = driver.execute_script("return navigator.userAgent")
     sess.headers.update({"User-Agent": ua, "Referer": driver.current_url})
@@ -136,14 +167,14 @@ try:
     cand_meta = []
     for idx, (u, mime_hint) in enumerate(candidates, 1):
         try:
-            rr = sess.get(u, timeout=30, allow_redirects=True)
+            rr = sess.get(u, timeout=15, allow_redirects=True)
             ctype = (rr.headers.get("content-type") or mime_hint or "").lower()
             fname = safe_name(rr.url, idx, ctype)
             (OUT / fname).write_bytes(rr.content)
             cand_meta.append({"source_url": u, "final_url": rr.url, "status": rr.status_code, "content_type": ctype, "length": len(rr.content), "file": fname})
-            print("SAVE", rr.status_code, ctype, len(rr.content), fname, rr.url)
+            print("SAVE", rr.status_code, ctype, len(rr.content), fname, rr.url, flush=True)
         except Exception as e:
-            print("SAVE ERROR", u, repr(e))
+            print("SAVE ERROR", u, repr(e), flush=True)
     (OUT / "candidate_fetches.json").write_text(json.dumps(cand_meta, indent=2), encoding="utf-8")
 finally:
     driver.quit()
