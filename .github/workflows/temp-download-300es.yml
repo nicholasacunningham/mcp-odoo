@@ -1,0 +1,25 @@
+name: Temporary Download 300ES
+
+on:
+  push:
+    branches:
+      - temp-probate-fetch-20260829-run
+  workflow_dispatch:
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download official blank Form 300ES
+        run: |
+          mkdir -p form300es
+          curl -L --fail --retry 2 'https://www.sccourts.org/media/forms/pdf/300ES.pdf' -o form300es/300ES.pdf
+          file form300es/300ES.pdf
+          ls -lh form300es/300ES.pdf
+      - name: Upload form
+        uses: actions/upload-artifact@v4
+        with:
+          name: form-300es
+          path: form300es/300ES.pdf
