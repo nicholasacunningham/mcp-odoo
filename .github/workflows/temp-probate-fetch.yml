@@ -1,0 +1,58 @@
+name: Temporary probate viewer inspection
+
+on:
+  push:
+    branches:
+      - temp-probate-fetch-20260828
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Inspect probate viewer
+        shell: bash
+        run: |
+          mkdir -p /tmp/probate
+          cd /tmp/probate
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install chromium >/dev/null 2>&1
+          cat > inspect.js <<'NODE'
+          const { chromium } = require('playwright');
+          (async () => {
+            const target = 'https://www.southcarolinaprobate.net/search/ViewImage.aspx?id=61fd5200-b215-49a2-ba59-0ca38cc3aa3e';
+            const browser = await chromium.launch({headless:true});
+            const context = await browser.newContext({ignoreHTTPSErrors:true, acceptDownloads:true});
+            const page = await context.newPage();
+            const seen = [];
+            page.on('response', async r => {
+              const ct = (await r.allHeaders())['content-type'] || '';
+              const u = r.url();
+              seen.push({status:r.status(), ct, url:u});
+              console.log(`RESP ${r.status()} ${ct} ${u}`);
+            });
+            page.on('requestfailed', req => console.log(`FAILED ${req.failure()?.errorText || ''} ${req.url()}`));
+            await page.goto(target, {waitUntil:'networkidle', timeout:120000});
+            await page.waitForTimeout(8000);
+            console.log('TITLE', await page.title());
+            console.log('FINAL', page.url());
+            console.log('FRAMES');
+            for (const f of page.frames()) console.log('FRAME', f.url());
+            const html = await page.content();
+            console.log('HTML_BEGIN');
+            console.log(html.slice(0,100000));
+            console.log('HTML_END');
+            console.log('CANDIDATES_BEGIN');
+            for (const x of seen) {
+              if (/pdf|image|octet|tiff|jpeg|jpg|png|viewer|document|download|ashx|asmx|api/i.test(`${x.ct} ${x.url}`)) {
+                console.log(JSON.stringify(x));
+              }
+            }
+            console.log('CANDIDATES_END');
+            await page.screenshot({path:'viewer.png', fullPage:true});
+            await browser.close();
+          })().catch(e => { console.error(e.stack || e); process.exit(1); });
+          NODE
+          node inspect.js
