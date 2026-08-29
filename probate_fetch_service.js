@@ -1,103 +1,71 @@
 const http = require('http');
+const fs = require('fs');
+const cp = require('child_process');
 const crypto = require('crypto');
 
 const ORIGIN = 'https://www.southcarolinaprobate.net';
 const TARGET = ORIGIN + '/search/ViewImage.aspx?id=61fd5200-b215-49a2-ba59-0ca38cc3aa3e';
-let result = { status: 'starting' };
+let result = {status:'starting'};
 
-function pick(body, re) {
-  const m = body.match(re);
-  return m ? m[1] : null;
-}
-function cookieHeader(headers) {
-  const setCookie = headers.getSetCookie ? headers.getSetCookie() : [];
-  return setCookie.map(x => x.split(';')[0]).join('; ');
-}
-function snippets(text, terms) {
-  const out = {};
-  for (const term of terms) {
-    const hits = [];
-    let i = 0;
-    while ((i = text.indexOf(term, i)) !== -1 && hits.length < 8) {
-      hits.push(text.slice(Math.max(0, i - 450), Math.min(text.length, i + term.length + 650)));
-      i += term.length;
-    }
-    out[term] = hits;
+function pick(body,re){const m=body.match(re);return m?m[1]:null;}
+function cookies(headers){const a=headers.getSetCookie?headers.getSetCookie():[];return a.map(x=>x.split(';')[0]).join('; ');}
+function xmlDecode(s){return s.replace(/&#x([0-9a-f]+);/gi,(_,h)=>String.fromCodePoint(parseInt(h,16))).replace(/&#(\d+);/g,(_,d)=>String.fromCodePoint(+d)).replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');}
+async function buf(url,opts={}){const r=await fetch(url,opts);const b=Buffer.from(await r.arrayBuffer());return {r,b};}
+
+async function inspect(){
+ try{
+  const common={'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36','accept-language':'en-US,en;q=0.9'};
+  const p=await fetch(TARGET,{redirect:'follow',headers:{...common,accept:'text/html,*/*'}}); const body=await p.text(); const ck=cookies(p.headers);
+  const c={stateId:pick(body,/stateId:\s*\\?"([^"\\]+)\\?"/),sid:pick(body,/sid:\s*\\?"([^"\\]+)\\?"/),sidParameter:pick(body,/sidParameter:\s*\\?"([^"\\]+)\\?"/),handlerUrl:pick(body,/handlerUrl:\s*\\?"([^"\\]+)\\?"/),cacheInfoKey:pick(body,/cacheInfoKey:\s*\\?"([^"\\]+)\\?"/)};
+  const handler=ORIGIN+(c.handlerUrl||'/search/documentviewer.ashx');
+  const headers={...common,referer:TARGET,cookie:ck};
+
+  const prepUrl=handler+'/PrepareDocument';
+  const prep=await fetch(prepUrl,{method:'POST',headers:{...headers,'content-type':'application/json'},body:JSON.stringify({cacheInfoKey:c.cacheInfoKey,stateId:c.stateId})});
+  const prepText=await prep.text();
+  console.log('PREPARE',prep.status,prepText.slice(0,10000));
+  let lastModified=null; try{const j=JSON.parse(prepText); lastModified=j?.Result?.lastModified||j?.result?.lastModified||null;}catch{}
+
+  const q=new URLSearchParams({cacheInfoKey:c.cacheInfoKey,stateId:c.stateId}); if(lastModified) q.set('v',lastModified);
+  const dl=await buf(handler+'/DownloadDocument?'+q.toString(),{headers:{...headers,accept:'*/*'}});
+  fs.writeFileSync('/tmp/probate.xpz',dl.b);
+  console.log('XPZ',JSON.stringify({status:dl.r.status,length:dl.b.length,sha256:crypto.createHash('sha256').update(dl.b).digest('hex'),type:dl.r.headers.get('content-type'),disp:dl.r.headers.get('content-disposition')}));
+
+  const entries=cp.execFileSync('unzip',['-Z1','/tmp/probate.xpz'],{encoding:'utf8',maxBuffer:10*1024*1024}).trim().split(/\r?\n/).filter(Boolean);
+  console.log('ZIP_ENTRIES_BEGIN'); console.log(JSON.stringify(entries,null,2)); console.log('ZIP_ENTRIES_END');
+
+  const pages=entries.filter(e=>/^Pages\/\d+\.xaml$/i.test(e)).sort((a,b)=>parseInt(a.match(/\d+/)[0])-parseInt(b.match(/\d+/)[0]));
+  const pageText=[];
+  for(const e of pages){
+    const x=cp.execFileSync('unzip',['-p','/tmp/probate.xpz',e],{encoding:'utf8',maxBuffer:20*1024*1024});
+    const strings=[];
+    for(const m of x.matchAll(/UnicodeString="([\s\S]*?)"/g)) strings.push(xmlDecode(m[1]));
+    for(const m of x.matchAll(/UnicodeString='([\s\S]*?)'/g)) strings.push(xmlDecode(m[1]));
+    const joined=strings.join(' ').replace(/\s+/g,' ').trim();
+    pageText.push({page:parseInt(e.match(/\d+/)[0]),entry:e,text:joined,xamlLength:x.length,unicodeRuns:strings.length});
   }
-  return out;
-}
+  console.log('PAGE_TEXT_BEGIN'); console.log(JSON.stringify(pageText,null,2)); console.log('PAGE_TEXT_END');
 
-async function fetchBuf(url, headers = {}) {
-  const r = await fetch(url, { redirect: 'follow', headers });
-  const ab = await r.arrayBuffer();
-  const buf = Buffer.from(ab);
-  return {
-    url: r.url,
-    status: r.status,
-    headers: Object.fromEntries(r.headers.entries()),
-    buf,
-    text: (() => { try { return buf.toString('utf8'); } catch { return ''; } })()
-  };
-}
-
-async function inspect() {
-  try {
-    const common = {
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36',
-      'accept-language': 'en-US,en;q=0.9'
-    };
-    const p = await fetch(TARGET, { redirect:'follow', headers:{...common, accept:'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'} });
-    const body = await p.text();
-    const cookies = cookieHeader(p.headers);
-    const config = {
-      stateId: pick(body, /stateId:\s*\\?"([^"\\]+)\\?"/),
-      sid: pick(body, /sid:\s*\\?"([^"\\]+)\\?"/),
-      sidParameter: pick(body, /sidParameter:\s*\\?"([^"\\]+)\\?"/),
-      path: pick(body, /path:\s*\\?"([^"\\]+)\\?"/),
-      handlerUrl: pick(body, /handlerUrl:\s*\\?"([^"\\]+)\\?"/),
-      cacheInfoKey: pick(body, /cacheInfoKey:\s*\\?"([^"\\]+)\\?"/)
-    };
-    console.log('CONFIG', JSON.stringify({config, cookies}, null, 2));
-
-    const viewerJsUrl = ORIGIN + '/search/resource.ashx/638178877840000000/viewer.js';
-    const jsr = await fetchBuf(viewerJsUrl, {...common, referer:TARGET, cookie:cookies});
-    const trace = snippets(jsr.text, ['DownloadDocument','PrepareDocument','cacheInfoKey','sidParameter','GetPage','PageText','SearchDocument','DownloadFile']);
-    console.log('VIEWER_JS_TRACE_BEGIN');
-    console.log(JSON.stringify({status:jsr.status, length:jsr.buf.length, trace}, null, 2));
-    console.log('VIEWER_JS_TRACE_END');
-
-    const baseHandler = ORIGIN + (config.handlerUrl || '/search/documentviewer.ashx');
-    const q = new URLSearchParams();
-    if (config.stateId) q.set('stateId', config.stateId);
-    if (config.cacheInfoKey) q.set('cacheInfoKey', config.cacheInfoKey);
-    if (config.sidParameter && config.sid) q.set(config.sidParameter, config.sid);
-    q.set('_', Date.now().toString());
-    const endpoints = ['DownloadDocument','PrepareDocument'];
-    const attempts = [];
-    for (const ep of endpoints) {
-      const url = `${baseHandler}/${ep}?${q.toString()}`;
-      try {
-        const rr = await fetchBuf(url, {...common, referer:TARGET, cookie:cookies, accept:'*/*'});
-        attempts.push({
-          ep, url, status:rr.status, headers:rr.headers, length:rr.buf.length,
-          sha256: crypto.createHash('sha256').update(rr.buf).digest('hex'),
-          first64hex: rr.buf.subarray(0,64).toString('hex'),
-          textStart: rr.text.slice(0,3000)
-        });
-      } catch (e) {
-        attempts.push({ep, error:String(e && e.stack || e)});
-      }
-    }
-    console.log('ENDPOINT_ATTEMPTS_BEGIN');
-    console.log(JSON.stringify(attempts, null, 2));
-    console.log('ENDPOINT_ATTEMPTS_END');
-    result = {status:'done', config, cookies, viewerTrace:trace, attempts};
-  } catch (e) {
-    result = { status: 'error', error: String(e && e.stack || e) };
-    console.error('FATAL', result);
+  const images=entries.filter(e=>/\.(png|jpe?g|tif?f|bmp|gif)$/i.test(e));
+  const imageInfo=[];
+  for(const e of images.slice(0,100)){
+    const b=cp.execFileSync('unzip',['-p','/tmp/probate.xpz',e],{encoding:null,maxBuffer:30*1024*1024});
+    imageInfo.push({entry:e,length:b.length,first16:b.subarray(0,16).toString('hex')});
   }
-}
+  console.log('IMAGE_INFO_BEGIN'); console.log(JSON.stringify(imageInfo,null,2)); console.log('IMAGE_INFO_END');
 
+  const alternatives=[];
+  for(const method of ['DownloadAsPdf','DownloadSource']){
+    try{
+      const qq=new URLSearchParams({cacheInfoKey:c.cacheInfoKey,stateId:c.stateId});
+      const rr=await buf(handler+'/'+method+'?'+qq.toString(),{headers:{...headers,accept:'*/*'}});
+      alternatives.push({method,status:rr.r.status,length:rr.b.length,type:rr.r.headers.get('content-type'),disp:rr.r.headers.get('content-disposition'),first16:rr.b.subarray(0,16).toString('hex'),sha256:crypto.createHash('sha256').update(rr.b).digest('hex')});
+      if(rr.r.status===200 && rr.b.length>1000) fs.writeFileSync('/tmp/'+method,rr.b);
+    }catch(e){alternatives.push({method,error:String(e)});}
+  }
+  console.log('ALTERNATIVES',JSON.stringify(alternatives,null,2));
+  result={status:'done',config:c,prepare:prepText,pageText,entries,images:imageInfo,alternatives};
+ }catch(e){result={status:'error',error:String(e&&e.stack||e)};console.error('FATAL',result);}
+}
 inspect();
-http.createServer((req,res)=>{res.writeHead(200,{'content-type':'application/json; charset=utf-8'});res.end(JSON.stringify(result));})
-  .listen(process.env.PORT || 10000, '0.0.0.0', ()=>console.log('listening'));
+http.createServer((req,res)=>{res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(result));}).listen(process.env.PORT||10000,'0.0.0.0',()=>console.log('listening'));
